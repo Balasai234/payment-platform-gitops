@@ -7,4 +7,4 @@ resources:
   - namespace.yaml
 images:
   - name: 243746944939.dkr.ecr.us-east-1.amazonaws.com/payment-platform
-    newTag: latest
+    newTag: d732f7b6028f33c2f9978596388310dc0ed0122e
