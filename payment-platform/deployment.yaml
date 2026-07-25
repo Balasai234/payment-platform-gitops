@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-platform
+  labels:
+    app: payment-platform
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: payment-platform
+
+  template:
+    metadata:
+      labels:
+        app: payment-platform
+
+    spec:
+      containers:
+        - name: payment-platform
+          image: 243746944939.dkr.ecr.us-east-1.amazonaws.com/payment-platform:latest
+
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
