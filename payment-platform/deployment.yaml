@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: payment-platform
-          image: 243746944939.dkr.ecr.us-east-1.amazonaws.com/payment-platform:latest
+          image: 243746944939.dkr.ecr.us-east-1.amazonaws.com/payment-platform
 
           imagePullPolicy: Always
 

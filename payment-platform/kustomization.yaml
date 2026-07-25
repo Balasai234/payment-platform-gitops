@@ -5,3 +5,6 @@ resources:
   - deployment.yaml
   - service.yaml
   - namespace.yaml
+images:
+  - name: 243746944939.dkr.ecr.us-east-1.amazonaws.com/payment-platform
+    newTag: latest
