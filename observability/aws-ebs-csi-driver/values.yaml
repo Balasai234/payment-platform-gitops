@@ -1,6 +1,8 @@
 controller:
   serviceAccount:
     create: true
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::243746944939:role/AmazonEKS_EBS_CSI_DriverRole
 
 node:
   tolerateAllTaints: true
