@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: aws-ebs-csi-driver
+  namespace: argocd
+
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+      chart: aws-ebs-csi-driver
+      targetRevision: 2.40.0
+      helm:
+        valueFiles:
+          - $values/observability/aws-ebs-csi-driver/values.yaml
+
+    - repoURL: https://github.com/Balasai234/payment-platform-gitops.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

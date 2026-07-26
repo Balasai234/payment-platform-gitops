@@ -1,0 +1,6 @@
+controller:
+  serviceAccount:
+    create: true
+
+node:
+  tolerateAllTaints: true
