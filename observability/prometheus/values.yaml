@@ -19,7 +19,7 @@ server:
 alertmanager:
   enabled: true
 
-  persistentVolume:
+  persistence:
     enabled: true
     size: 5Gi
     storageClass: gp2
