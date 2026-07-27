@@ -3,7 +3,7 @@ adminUser: admin
 adminPassword: admin123
 
 service:
-  type: ClusterIP
+  type: loadBalancer
 
 persistence:
   enabled: true
