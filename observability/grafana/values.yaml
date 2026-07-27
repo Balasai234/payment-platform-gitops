@@ -3,7 +3,7 @@ adminUser: admin
 adminPassword: admin123
 
 service:
-  type: loadBalancer
+  type: LoadBalancer
 
 persistence:
   enabled: true
