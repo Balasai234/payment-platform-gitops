@@ -1,3 +1,6 @@
+# Minimal Loki configuration for the lab cluster
+# Loki only — no Promtail, canary, caches, or bundled Grafana.
+
 deploymentMode: SingleBinary
 
 loki:
@@ -24,3 +27,29 @@ singleBinary:
 
   persistence:
     enabled: false
+
+# Disable distributed-mode components
+backend:
+  replicas: 0
+
+read:
+  replicas: 0
+
+write:
+  replicas: 0
+
+# Disable components we don't need
+gateway:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+
+chunksCache:
+  enabled: false
+
+resultsCache:
+  enabled: false
+
+test:
+  enabled: false
