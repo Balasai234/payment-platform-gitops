@@ -28,6 +28,14 @@ singleBinary:
   persistence:
     enabled: false
 
+  extraVolumeMounts:
+    - name: loki-data
+      mountPath: /var/loki
+
+  extraVolumes:
+    - name: loki-data
+      emptyDir: {}
+
 # Disable distributed-mode components
 backend:
   replicas: 0
