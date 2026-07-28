@@ -16,6 +16,8 @@ image:
 config:
   exporters:
     debug: {}
+    otlphttp/loki:
+      endpoint: http://loki.observability.svc.cluster.local:3100/otlp
 
   extensions:
     health_check:
