@@ -15,7 +15,7 @@ spec:
       targetRevision: 2.10.2
       helm:
         valueFiles:
-          - $values/observability/loki/values.yaml
+          - $values/observability/Loki/values.yaml
 
     # Your GitOps Repository
     - repoURL: https://github.com/Balasai234/payment-platform-gitops.git
