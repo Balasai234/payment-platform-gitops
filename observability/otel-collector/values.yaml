@@ -73,7 +73,7 @@ config:
       logs:
         receivers: [otlp,filelog]
         processors: [memory_limiter, batch]
-        exporters: [debug]
+        exporters: [debug, otlphttp/loki]
 
       metrics:
         receivers: [otlp, prometheus]
