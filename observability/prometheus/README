@@ -1,0 +1,478 @@
+# Metrics Architecture
+
+## Overview
+
+The payment platform uses **Prometheus** as the metrics backend and **Grafana** for metrics visualisation.
+
+Two categories of metrics were collected:
+
+1. **Application metrics** from the Spring Boot application.
+2. **Infrastructure metrics** from the EKS worker nodes.
+
+The overall architecture is:
+
+```text
+                   Application Metrics
+
+Spring Boot Application
+        |
+        v
+Micrometer
+        |
+        v
+Spring Boot Actuator
+        |
+        v
+/actuator/prometheus
+        |
+        | scrape
+        v
+     Prometheus
+        |
+        v
+      Grafana
+
+
+                Infrastructure Metrics
+
+EKS Worker Node
+        |
+        v
+Prometheus Node Exporter
+        |
+        | exposes node metrics
+        v
+     Prometheus
+        |
+        v
+      Grafana
+```
+
+---
+
+## Application Metrics
+
+The Spring Boot application uses **Micrometer** to instrument application metrics.
+
+Micrometer provides a vendor-neutral metrics instrumentation API for JVM applications.
+
+The Prometheus registry exposes Micrometer metrics in a format that Prometheus can scrape.
+
+Conceptually:
+
+```text
+Application activity
+       |
+       v
+   Micrometer
+       |
+       v
+Prometheus Registry
+       |
+       v
+Spring Boot Actuator
+       |
+       v
+/actuator/prometheus
+```
+
+Application metrics can include:
+
+```text
+HTTP request count
+HTTP request duration
+JVM memory usage
+JVM garbage collection
+Thread information
+Process CPU usage
+Application uptime
+```
+
+---
+
+## Spring Boot Actuator
+
+Spring Boot Actuator provides management and observability endpoints.
+
+Application health was verified using:
+
+```bash
+curl http://localhost:8081/actuator/health
+```
+
+A healthy application returned:
+
+```json
+{
+  "status": "UP"
+}
+```
+
+The Prometheus metrics endpoint is exposed through:
+
+```text
+/actuator/prometheus
+```
+
+Unlike logs, Prometheus metrics use a **pull-based model**.
+
+The application does not continuously push these metrics to Prometheus.
+
+Instead:
+
+```text
+Prometheus
+    |
+    | HTTP GET periodically
+    v
+/actuator/prometheus
+    |
+    v
+Metric samples
+```
+
+Prometheus performs this operation according to its configured scrape interval.
+
+---
+
+## Prometheus
+
+Prometheus acts as the central time-series metrics backend.
+
+Its responsibilities include:
+
+```text
+Discover targets
+      |
+      v
+Scrape metrics
+      |
+      v
+Store time-series data
+      |
+      v
+Evaluate PromQL queries
+      |
+      v
+Provide data to Grafana
+```
+
+In this environment, the Prometheus server was running as a **StatefulSet**.
+
+This should not be confused with Node Exporter, which runs as a DaemonSet.
+
+---
+
+## Infrastructure Metrics with Node Exporter
+
+Application metrics tell us what is happening **inside the application**.
+
+Infrastructure metrics tell us what is happening on the **EKS worker nodes**.
+
+Prometheus Node Exporter provides metrics such as:
+
+```text
+Node CPU utilisation
+Memory usage
+Filesystem usage
+Disk statistics
+Network statistics
+System load
+```
+
+Node Exporter was enabled through the Prometheus Helm `values.yaml`.
+
+It was not deployed using a manually written DaemonSet manifest.
+
+Conceptually:
+
+```text
+Prometheus Helm values
+        |
+        | Node Exporter enabled
+        v
+Prometheus Helm Chart
+        |
+        | renders Kubernetes resources
+        v
+Node Exporter DaemonSet
+        |
+        v
+One Node Exporter pod per EKS worker node
+```
+
+The architecture therefore becomes:
+
+```text
+Node 1 ── Node Exporter ──┐
+                          |
+Node 2 ── Node Exporter ──┼──> Prometheus
+                          |         |
+Node 3 ── Node Exporter ──┘         |
+                                    v
+                                  Grafana
+```
+
+Running Node Exporter as a DaemonSet ensures that each worker node can expose its own infrastructure metrics.
+
+---
+
+## Prometheus vs Node Exporter
+
+These components perform different jobs.
+
+### Node Exporter
+
+Node Exporter:
+
+```text
+Collects operating-system/node metrics
+            +
+Exposes those metrics over HTTP
+```
+
+It does **not** act as the central metrics database.
+
+### Prometheus
+
+Prometheus:
+
+```text
+Discovers metric targets
+        |
+        v
+Scrapes targets
+        |
+        v
+Stores time-series data
+        |
+        v
+Executes PromQL
+        |
+        v
+Serves metrics to Grafana
+```
+
+Therefore:
+
+```text
+Node Exporter = metric producer
+
+Prometheus = scraper + time-series database + query engine
+
+Grafana = visualisation layer
+```
+
+---
+
+# Latency Metrics
+
+One important application metric monitored during the project was HTTP request latency.
+
+Average latency alone can hide slow requests.
+
+For this reason, percentile-based latency measurements such as **P95 and P99** are commonly used.
+
+---
+
+## P95 Latency
+
+P95 represents the latency threshold below which approximately **95% of requests complete**.
+
+For example:
+
+```text
+P95 = 200 ms
+```
+
+means approximately:
+
+```text
+95% of requests <= 200 ms
+
+5% of requests > 200 ms
+```
+
+---
+
+## P99 Latency
+
+P99 focuses further into the slowest requests.
+
+For example:
+
+```text
+P99 = 800 ms
+```
+
+means approximately:
+
+```text
+99% of requests <= 800 ms
+
+1% of requests > 800 ms
+```
+
+P99 is particularly useful for identifying **tail latency** that may not be visible from averages.
+
+---
+
+## Prometheus Histograms
+
+Latency percentiles can be calculated from Prometheus histogram metrics.
+
+A typical histogram exposes buckets similar to:
+
+```text
+http_server_requests_seconds_bucket
+```
+
+Prometheus records how many requests fall within each latency boundary.
+
+PromQL can then estimate a percentile using `histogram_quantile()`.
+
+A representative P95 query is:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum(
+    rate(http_server_requests_seconds_bucket[5m])
+  ) by (le)
+)
+```
+
+For P99:
+
+```promql
+histogram_quantile(
+  0.99,
+  sum(
+    rate(http_server_requests_seconds_bucket[5m])
+  ) by (le)
+)
+```
+
+The exact metric name and labels depend on the Micrometer and Spring Boot configuration being used.
+
+---
+
+# Why Metrics Alone Are Not Enough
+
+Metrics are excellent for detecting that something is wrong.
+
+For example:
+
+```text
+Grafana alert/dashboard
+
+P99 latency
+     |
+     v
+1.8 seconds
+```
+
+This tells us that some requests are slow.
+
+However, the metric alone may not explain **where those 1.8 seconds were spent**.
+
+That is where distributed tracing becomes useful.
+
+For example:
+
+```text
+Prometheus:
+
+P99 = 1.8 seconds
+
+             ↓ investigate
+
+Distributed Trace:
+
+HTTP /payment               1.8 s
+ |
+ +-- Request validation     20 ms
+ |
+ +-- Database query        120 ms
+ |
+ +-- Downstream service    1.6 s
+```
+
+Prometheus helps answer:
+
+> "Is the application slow?"
+
+Distributed tracing can help answer:
+
+> "Which operation or downstream dependency made this particular request slow?"
+
+This is why metrics and traces complement each other.
+
+---
+
+# Metrics Pipeline Summary
+
+The implemented metrics architecture can be summarised as:
+
+```text
+APPLICATION METRICS
+
+Spring Boot
+    |
+    v
+Micrometer
+    |
+    v
+Actuator
+    |
+    v
+/actuator/prometheus
+    |
+    | scrape
+    v
+Prometheus StatefulSet
+    |
+    v
+Grafana
+
+
+INFRASTRUCTURE METRICS
+
+EKS Worker Nodes
+    |
+    v
+Node Exporter DaemonSet
+    |
+    | scrape
+    v
+Prometheus StatefulSet
+    |
+    v
+Grafana
+```
+
+---
+
+## Key Lessons
+
+The main lessons from the metrics implementation were:
+
+**Micrometer generates/instruments application metrics.**
+
+**Spring Boot Actuator exposes those metrics.**
+
+**The Prometheus registry converts them into a Prometheus-compatible representation.**
+
+**Prometheus periodically scrapes the metrics endpoint and stores the resulting time-series data.**
+
+**Node Exporter exposes operating-system metrics from each EKS worker node.**
+
+**The Prometheus Helm chart creates the Node Exporter DaemonSet when the component is enabled through Helm values.**
+
+**Prometheus itself runs separately from Node Exporter and acts as the central metrics backend.**
+
+**PromQL is used to query and aggregate the stored time-series data.**
+
+**Grafana queries Prometheus and visualises the results.**
+
+**P95 and P99 help expose tail latency that averages can hide.**

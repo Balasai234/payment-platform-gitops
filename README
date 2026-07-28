@@ -1,0 +1,165 @@
+# Payment Platform on AWS EKS
+
+## Project Overview
+
+This project implements a containerised Spring Boot payment platform deployed on Amazon EKS using a GitOps-based deployment model.
+
+The platform was designed to demonstrate a production-style Kubernetes architecture covering:
+
+- Infrastructure provisioning on AWS
+- Kubernetes workload deployment
+- GitOps-based continuous delivery
+- Application and infrastructure metrics
+- Centralised Kubernetes logging
+- OpenTelemetry-based telemetry collection
+- Grafana-based observability
+
+The application and observability components are managed declaratively using Kubernetes manifests, Helm charts, and Argo CD.
+
+---
+
+## High-Level Architecture
+
+```text
+                         GitHub
+                           |
+                           | GitOps
+                           v
+                        Argo CD
+                           |
+                           v
+                    Amazon EKS Cluster
+                           |
+          +----------------+----------------+
+          |                                 |
+          v                                 v
+  Payment Platform                   Observability
+   Spring Boot
+                                          |
+                          +---------------+---------------+
+                          |                               |
+                       Metrics                           Logs
+                          |                               |
+                 Micrometer/Actuator              Pod stdout/stderr
+                          |                               |
+                          v                               v
+                /actuator/prometheus              /var/log/pods
+                          |                               |
+                          | scrape                        v
+                          v                       OTel Collector
+                     Prometheus                    DaemonSet
+                          |                               |
+                          |                               | OTLP/HTTP
+                          |                               v
+                          |                              Loki
+                          |                               |
+                          +---------------+---------------+
+                                          |
+                                          v
+                                       Grafana
+```
+
+---
+
+## Technology Stack
+
+| Area | Technology |
+|---|---|
+| Cloud | AWS |
+| Container Orchestration | Amazon EKS / Kubernetes |
+| Application | Spring Boot |
+| GitOps | Argo CD |
+| Package Management | Helm |
+| Telemetry Collection | OpenTelemetry Collector |
+| Application Metrics | Micrometer + Spring Boot Actuator |
+| Metrics Backend | Prometheus |
+| Infrastructure Metrics | Prometheus Node Exporter |
+| Log Collection | OpenTelemetry `filelog` receiver |
+| Log Backend | Grafana Loki |
+| Visualisation | Grafana |
+| Trace Backend | Grafana Tempo — designed but not completed end-to-end |
+
+---
+
+## Observability Architecture
+
+The platform separates the three primary telemetry signals: metrics, logs, and traces.
+
+### Metrics
+
+Application metrics are generated using Micrometer and exposed through the Spring Boot Actuator Prometheus endpoint.
+
+```text
+Spring Boot
+     |
+     v
+Micrometer
+     |
+     v
+/actuator/prometheus
+     |
+     | Prometheus scrape
+     v
+Prometheus
+     |
+     v
+Grafana
+```
+
+Prometheus Node Exporter was enabled through the Prometheus Helm chart to expose EKS worker-node infrastructure metrics.
+
+The Prometheus server runs as a StatefulSet, while the Helm chart deploys Node Exporter as a DaemonSet across the worker nodes.
+
+### Logs
+
+Applications write logs to standard output and standard error. Kubernetes/container runtime makes these logs available on the worker-node filesystem.
+
+The OpenTelemetry Collector runs as a DaemonSet, allowing one Collector instance to run on each EKS worker node.
+
+```text
+Application stdout/stderr
+          |
+          v
+Worker Node
+/var/log/pods/...
+          |
+          | hostPath
+          v
+OTel Collector DaemonSet
+          |
+          | filelog receiver
+          v
+OTel Logs Pipeline
+          |
+          | OTLP/HTTP
+          v
+         Loki
+          |
+          v
+        Grafana
+```
+
+The logging pipeline was successfully verified end-to-end, including log ingestion into Loki and querying the data from Grafana Explore.
+
+### Traces
+
+The planned tracing architecture was:
+
+```text
+Spring Boot Instrumentation
+          |
+          | OTLP
+          v
+OTel Collector
+          |
+          | OTLP
+          v
+        Tempo
+          |
+          v
+        Grafana
+```
+
+Tempo deployment and the tracing architecture were explored, but distributed tracing was **not completed and verified end-to-end before the AWS infrastructure was removed**.
+
+This README therefore does not represent tracing as a completed platform capability.

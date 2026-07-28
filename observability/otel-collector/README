@@ -1,0 +1,852 @@
+# Centralised Logging with OpenTelemetry and Loki
+
+## Overview
+
+The payment platform uses the **OpenTelemetry Collector** for centralised Kubernetes log collection and **Grafana Loki** as the log storage backend.
+
+The final implemented logging architecture was:
+
+```text
+Spring Boot / Kubernetes Pods
+          |
+          | stdout / stderr
+          v
+Container Runtime
+          |
+          v
+EKS Worker Node
+/var/log/pods/...
+          |
+          | hostPath mount
+          v
+OpenTelemetry Collector
+      DaemonSet
+          |
+          | filelog receiver
+          v
+     Logs Pipeline
+          |
+          +--> processors
+          |
+          v
+   OTLP/HTTP Exporter
+          |
+          v
+        Loki
+          |
+          v
+       Grafana
+```
+
+This logging pipeline was successfully verified end-to-end.
+
+---
+
+# Why OpenTelemetry Collector?
+
+The objective was to use OpenTelemetry as the central telemetry collection layer where practical.
+
+The Collector provides a common architecture based on:
+
+```text
+Receiver
+   |
+   v
+Processor
+   |
+   v
+Exporter
+```
+
+Each component has a specific responsibility.
+
+### Receiver
+
+A receiver determines **how telemetry enters the Collector**.
+
+For Kubernetes container logs, the `filelog` receiver was used.
+
+### Processor
+
+Processors operate on telemetry after it has been received.
+
+They can perform operations such as:
+
+- memory protection
+- batching
+- filtering
+- attribute manipulation
+- Kubernetes metadata enrichment
+
+### Exporter
+
+An exporter determines **where telemetry leaves the Collector**.
+
+For logs, the Collector exports telemetry to Loki using OTLP over HTTP.
+
+---
+
+# Why Run the Collector as a DaemonSet?
+
+Initially the OpenTelemetry Collector was running as a Deployment.
+
+For node-level Kubernetes log collection, it was changed to a **DaemonSet**.
+
+A DaemonSet ensures that Kubernetes attempts to run one Collector pod on each eligible worker node.
+
+```text
+EKS Cluster
+
+Worker Node 1
+├── Application Pods
+└── OTel Collector
+
+Worker Node 2
+├── Application Pods
+└── OTel Collector
+
+Worker Node 3
+├── Application Pods
+└── OTel Collector
+```
+
+This architecture is useful because Kubernetes container logs exist on the filesystem of the node where the container is running.
+
+Each Collector therefore reads logs from its local worker node.
+
+If the cluster adds another eligible worker node, the DaemonSet can automatically schedule another Collector instance there.
+
+---
+
+# Where Kubernetes Container Logs Come From
+
+Applications running in containers normally write logs to:
+
+```text
+stdout
+stderr
+```
+
+The container runtime captures those streams and Kubernetes makes container log files available on the worker node.
+
+For this implementation, logs were collected from:
+
+```text
+/var/log/pods
+```
+
+The Collector does not automatically have access to the host filesystem.
+
+Therefore, the node directory must be mounted into the Collector pod.
+
+---
+
+# Mounting Node Logs into the Collector
+
+The OpenTelemetry Helm values configured a `hostPath` volume:
+
+```yaml
+mode: daemonset
+
+extraVolumes:
+  - name: varlogpods
+    hostPath:
+      path: /var/log/pods
+
+extraVolumeMounts:
+  - name: varlogpods
+    mountPath: /var/log/pods
+    readOnly: true
+```
+
+The flow becomes:
+
+```text
+Worker Node
+
+/var/log/pods
+      |
+      | hostPath
+      v
+OTel Collector Pod
+
+/var/log/pods
+```
+
+The mount is read-only because the Collector only needs to **read** application logs.
+
+It should not modify Kubernetes container log files.
+
+---
+
+# Filelog Receiver
+
+The `filelog` receiver reads the container log files mounted into the Collector.
+
+The configuration used a pattern similar to:
+
+```yaml
+receivers:
+  filelog:
+    include:
+      - /var/log/pods/*/*/*.log
+
+    start_at: end
+
+    include_file_path: true
+```
+
+### `include`
+
+```yaml
+include:
+  - /var/log/pods/*/*/*.log
+```
+
+This tells the Collector which files should be monitored.
+
+The wildcard pattern allows the Collector to discover logs from many pods and containers without creating separate configuration for every application.
+
+This is important in Kubernetes environments containing many microservices.
+
+We do not configure:
+
+```text
+service-a.log
+service-b.log
+service-c.log
+...
+```
+
+individually.
+
+Instead, the Collector discovers files using the Kubernetes log directory structure.
+
+---
+
+# `start_at: end`
+
+The configuration included:
+
+```yaml
+start_at: end
+```
+
+This tells the filelog receiver to begin reading newly discovered files from the end rather than replaying the entire existing file from the beginning.
+
+This can prevent a newly deployed Collector from immediately ingesting a large amount of historical log data.
+
+The appropriate setting may differ depending on operational requirements.
+
+---
+
+# `include_file_path`
+
+The configuration included:
+
+```yaml
+include_file_path: true
+```
+
+This preserves the source file path as an attribute on the log record.
+
+The file path can also provide useful context when determining which Kubernetes pod/container generated a log record.
+
+---
+
+# OpenTelemetry Logs Pipeline
+
+The Collector configuration connects components through the `service.pipelines` section.
+
+The logs pipeline eventually followed this model:
+
+```yaml
+service:
+  pipelines:
+    logs:
+      receivers:
+        - otlp
+        - filelog
+
+      processors:
+        - memory_limiter
+        - batch
+
+      exporters:
+        - debug
+        - otlphttp/loki
+```
+
+Conceptually:
+
+```text
+filelog
+   |
+   |
+OTLP receiver
+   |
+   +----------+
+              |
+              v
+       memory_limiter
+              |
+              v
+            batch
+              |
+        +-----+------+
+        |            |
+        v            v
+      debug      otlphttp/loki
+                     |
+                     v
+                    Loki
+```
+
+The OTLP receiver also allows applications capable of producing OTLP logs to send them directly to the Collector.
+
+---
+
+# Memory Limiter Processor
+
+The Collector included:
+
+```yaml
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+```
+
+The `memory_limiter` processor protects the Collector from excessive memory consumption.
+
+Telemetry volume can increase unexpectedly.
+
+Without memory protection:
+
+```text
+Large telemetry volume
+        |
+        v
+Collector memory increases
+        |
+        v
+Container memory limit reached
+        |
+        v
+OOMKilled
+```
+
+The memory limiter provides protection against this scenario.
+
+It is therefore generally placed early in the processing pipeline.
+
+---
+
+# Batch Processor
+
+The Collector also used:
+
+```yaml
+processors:
+  batch: {}
+```
+
+Instead of exporting every telemetry record individually, the batch processor can group telemetry before export.
+
+Conceptually:
+
+```text
+Log 1 ─┐
+Log 2 ─┤
+Log 3 ─┤
+Log 4 ─┤
+Log 5 ─┘
+        |
+        v
+      batch
+        |
+        v
+   Export together
+```
+
+Batching can reduce exporter/network overhead and improve efficiency.
+
+---
+
+# Kubernetes Metadata Enrichment
+
+A raw container log is much more useful when Kubernetes context is attached.
+
+Useful metadata can include:
+
+```text
+namespace
+pod name
+container name
+node name
+deployment/workload
+labels
+```
+
+The OpenTelemetry `k8sattributes` processor can enrich telemetry with Kubernetes metadata.
+
+Conceptually:
+
+```text
+Raw log
+
+"Payment request received"
+
+          |
+          v
+
+k8sattributes
+
+          |
+          v
+
+Enriched log
+
+message    = "Payment request received"
+namespace  = "payment-platform"
+pod        = "payment-service-xxxxx"
+container  = "payment-service"
+node       = "ip-10-0-x-x"
+```
+
+The processor communicates with the Kubernetes API and maintains Kubernetes metadata internally.
+
+It does **not** require Redis or a separate metadata-cache service.
+
+Conceptually:
+
+```text
+Kubernetes API
+      |
+      | watch pod metadata
+      v
+OTel Collector
+      |
+      +--> in-memory metadata information
+                    |
+Log record --------+
+                    |
+                    v
+             Enriched record
+```
+
+The Collector therefore does not need to perform a completely independent Kubernetes API lookup for every individual log line.
+
+Correct pod association and RBAC configuration are important when implementing this processor.
+
+Metadata enrichment was explored as part of the logging design; it should be configured and verified carefully before relying on particular Kubernetes attributes in production.
+
+---
+
+# Loki Exporter
+
+Loki was configured as an OTLP/HTTP destination:
+
+```yaml
+exporters:
+  otlphttp/loki:
+    endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+```
+
+The Kubernetes DNS name:
+
+```text
+loki.observability.svc.cluster.local
+```
+
+can be broken down as:
+
+```text
+loki
+ |
+ | Service
+
+observability
+ |
+ | Namespace
+
+svc.cluster.local
+ |
+ | Kubernetes cluster DNS
+```
+
+This allows the Collector to communicate with Loki internally without exposing Loki publicly.
+
+---
+
+# Important OpenTelemetry Pipeline Lesson
+
+One of the most important problems discovered during implementation was that **defining an exporter does not automatically activate it**.
+
+At one point the Collector configuration contained:
+
+```yaml
+exporters:
+  debug: {}
+
+  otlphttp/loki:
+    endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+```
+
+This looked correct at first.
+
+However, the rendered logs pipeline contained only:
+
+```yaml
+logs:
+  exporters:
+    - debug
+```
+
+Therefore the actual flow was:
+
+```text
+filelog
+   |
+   v
+processors
+   |
+   v
+debug
+```
+
+rather than:
+
+```text
+filelog
+   |
+   v
+processors
+   |
+   v
+Loki
+```
+
+The Loki exporter existed, but **nothing in the logs pipeline was sending telemetry to it**.
+
+The fix was to attach the exporter explicitly:
+
+```yaml
+service:
+  pipelines:
+    logs:
+      receivers:
+        - otlp
+        - filelog
+
+      processors:
+        - memory_limiter
+        - batch
+
+      exporters:
+        - debug
+        - otlphttp/loki
+```
+
+This gives an important OpenTelemetry rule:
+
+> Declaring a receiver, processor, or exporter does not automatically make it part of a telemetry flow. Components must be referenced by the appropriate `service.pipelines` configuration.
+
+---
+
+# Why Keep the Debug Exporter?
+
+During implementation, the `debug` exporter was useful for troubleshooting.
+
+```yaml
+exporters:
+  debug: {}
+```
+
+It allowed received telemetry to be inspected through Collector logs while the Loki integration was being tested.
+
+This created two outputs:
+
+```text
+Incoming logs
+      |
+      v
+Processors
+      |
+      +------> debug
+      |
+      +------> Loki
+```
+
+Once the platform is stable, debug output can be reduced or removed depending on operational requirements because high-volume debug logging can itself create unnecessary overhead.
+
+---
+
+# Verifying the Rendered Collector Configuration
+
+Because the Collector was deployed through:
+
+```text
+Git
+  ↓
+Argo CD
+  ↓
+Helm
+  ↓
+Kubernetes
+```
+
+we did not rely only on the local `values.yaml`.
+
+The rendered ConfigMap was inspected:
+
+```bash
+kubectl get configmap \
+  otel-collector-opentelemetry-collector-agent \
+  -n observability \
+  -o yaml
+```
+
+To specifically check the Loki exporter:
+
+```bash
+kubectl get configmap \
+  otel-collector-opentelemetry-collector-agent \
+  -n observability \
+  -o yaml | grep -A6 "otlphttp/loki"
+```
+
+This exposed an important configuration difference.
+
+The exporter was defined:
+
+```yaml
+otlphttp/loki:
+  endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+```
+
+but initially the rendered logs pipeline showed:
+
+```yaml
+logs:
+  exporters:
+    - debug
+```
+
+That proved the problem was in the Collector pipeline rather than Loki itself.
+
+---
+
+# Verifying Loki
+
+Loki's HTTP API was used to verify whether log data had reached the backend.
+
+The following command was executed inside the Loki pod:
+
+```bash
+kubectl exec \
+  -n observability \
+  loki-0 \
+  -c loki -- \
+  wget -qO- \
+  'http://localhost:3100/loki/api/v1/labels'
+```
+
+Before successful ingestion, Loki returned:
+
+```json
+{
+  "status": "success"
+}
+```
+
+After fixing the OpenTelemetry logs pipeline, the response became:
+
+```json
+{
+  "status": "success",
+  "data": [
+    "service_name"
+  ]
+}
+```
+
+This was an important verification point.
+
+It demonstrated that Loki now contained log data with indexed label information.
+
+The logs were subsequently visible through **Grafana Explore**.
+
+---
+
+# Why We Did Not Use Promtail
+
+Promtail was initially considered as the Loki log collector.
+
+However, the platform already contained an OpenTelemetry Collector and the goal was to centralise telemetry collection around OpenTelemetry where practical.
+
+The final logging architecture therefore used:
+
+```text
+OTel Collector
+      |
+      v
+     Loki
+```
+
+rather than:
+
+```text
+Promtail
+   |
+   v
+Loki
+```
+
+This reduced the number of separate log collection agents and provided a common Collector architecture that can also participate in metrics and tracing pipelines.
+
+---
+
+# Logs vs Metrics
+
+One important distinction learned during the project is that logs and Prometheus metrics enter the observability system differently.
+
+### Logs
+
+```text
+Application
+   |
+   | stdout/stderr
+   v
+Node filesystem
+   |
+   v
+/var/log/pods
+   |
+   | read
+   v
+OTel filelog receiver
+   |
+   v
+Loki
+```
+
+The Collector **reads log files**.
+
+### Application Metrics
+
+```text
+Application
+   |
+   v
+Micrometer
+   |
+   v
+/actuator/prometheus
+   ^
+   |
+   | scrape
+Prometheus
+```
+
+Prometheus **pulls metrics from an HTTP endpoint**.
+
+This difference is important when designing and troubleshooting observability pipelines.
+
+---
+
+# Scaling to Many Applications
+
+The filelog architecture does not require a separate receiver configuration for every microservice.
+
+For example, with 100 application services:
+
+```text
+Service A ─┐
+Service B ─┤
+Service C ─┤
+...        ├──> Kubernetes node log files
+Service Z ─┘             |
+                         v
+                   /var/log/pods
+                         |
+                         v
+                 OTel Collector
+```
+
+The wildcard filelog configuration discovers matching pod log files on each node.
+
+Kubernetes metadata can then be used to distinguish logs by namespace, pod, container, workload, and other attributes.
+
+This is significantly more scalable than maintaining a manually configured log path for every individual service.
+
+---
+
+# Logging Pipeline Summary
+
+The final verified architecture was:
+
+```text
+Application
+    |
+    | stdout / stderr
+    v
+Container Runtime
+    |
+    v
+EKS Worker Node
+    |
+    v
+/var/log/pods
+    |
+    | hostPath
+    v
+OTel Collector DaemonSet
+    |
+    v
+filelog receiver
+    |
+    v
+memory_limiter
+    |
+    v
+batch
+    |
+    v
+otlphttp/loki
+    |
+    v
+Loki
+    |
+    v
+Grafana Explore
+```
+
+---
+
+# Key Lessons
+
+The centralised logging implementation produced several important engineering lessons.
+
+**Kubernetes application logs originate from container stdout/stderr and are made available as files on the worker node.**
+
+**A DaemonSet is appropriate for node-local log collection because it places a Collector on each eligible worker node.**
+
+**`hostPath` allows the Collector pod to access `/var/log/pods` from its node.**
+
+**The `filelog` receiver determines how filesystem logs enter OpenTelemetry.**
+
+**Processors operate on telemetry between ingestion and export.**
+
+**The `memory_limiter` protects Collector memory and `batch` improves export efficiency.**
+
+**Kubernetes metadata enrichment can be performed with the `k8sattributes` processor when pod association and RBAC are correctly configured.**
+
+**An exporter defines a destination, but it does nothing until it is referenced by a telemetry pipeline.**
+
+**The Loki exporter sends logs from the Collector to Loki using OTLP/HTTP.**
+
+**Loki stores and queries logs; Grafana provides the user-facing exploration and visualisation layer.**
+
+**With GitOps and Helm, always inspect the rendered Kubernetes configuration when debugging instead of assuming the local `values.yaml` is what the workload is actually using.**

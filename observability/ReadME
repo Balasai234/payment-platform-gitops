@@ -1,0 +1,358 @@
+## GitOps Deployment Architecture
+
+The platform uses **Argo CD** as the GitOps continuous delivery controller for Kubernetes workloads and observability components.
+
+The core principle is that **Git is the desired-state source of truth**.
+
+Instead of manually installing platform components with commands such as:
+
+```bash
+helm install ...
+```
+
+the required Helm chart version, custom values, destination namespace, and synchronisation behaviour are declared through Argo CD `Application` resources.
+
+The deployment flow is:
+
+```text
+Developer
+    |
+    | git commit / push
+    v
+GitHub GitOps Repository
+    |
+    | watched by
+    v
+Argo CD
+    |
+    | compares desired vs actual state
+    v
+Amazon EKS
+    |
+    +-- Application workloads
+    |
+    +-- Prometheus
+    |
+    +-- OpenTelemetry Collector
+    |
+    +-- Loki
+    |
+    +-- Grafana
+```
+
+### Why GitOps?
+
+GitOps provides several operational benefits:
+
+- Kubernetes configuration is version controlled.
+- Changes can be reviewed before deployment.
+- Git history provides an audit trail.
+- Argo CD continuously compares Git with the EKS cluster.
+- Configuration drift can be automatically corrected.
+- Removed resources can automatically be pruned.
+- Platform configuration can be reproduced from the repository.
+
+---
+
+## Argo CD Multi-Source Applications
+
+For third-party observability components, the project uses the **multi-source Application pattern**.
+
+This allows Argo CD to obtain:
+
+1. The official Helm chart from the vendor's Helm repository.
+2. Environment-specific `values.yaml` from the project's GitOps repository.
+
+Conceptually:
+
+```text
+Official Helm Repository
+        |
+        | Helm chart
+        |
+        +-------------------+
+                            |
+                            v
+                         Argo CD
+                            ^
+                            |
+        +-------------------+
+        |
+        | values.yaml
+        |
+GitHub GitOps Repository
+```
+
+Argo CD combines the official chart with the configuration stored in Git and renders the final Kubernetes manifests.
+
+This avoids copying third-party Helm charts into the project repository while still keeping platform configuration under GitOps control.
+
+---
+
+## Example: Prometheus Argo CD Application
+
+Prometheus was deployed using the official Prometheus Community Helm chart.
+
+The Argo CD Application uses two sources:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: prometheus
+  namespace: argocd
+
+spec:
+  project: default
+
+  sources:
+
+    # Official Prometheus Helm Chart
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: prometheus
+      targetRevision: 27.39.0
+
+      helm:
+        valueFiles:
+          - $values/observability/prometheus/values.yaml
+
+    # GitOps Repository containing our values.yaml
+    - repoURL: <gitops-repository>
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+```
+
+The first source retrieves the official Helm chart.
+
+The second source is assigned:
+
+```yaml
+ref: values
+```
+
+This allows the first source to reference files from the Git repository using:
+
+```yaml
+$values/observability/prometheus/values.yaml
+```
+
+Therefore:
+
+```text
+$values
+   |
+   v
+GitOps repository
+   |
+   v
+observability/
+   |
+   v
+prometheus/
+   |
+   v
+values.yaml
+```
+
+---
+
+## Automated Synchronisation
+
+The applications use:
+
+```yaml
+syncPolicy:
+  automated:
+    prune: true
+    selfHeal: true
+```
+
+### Self-Heal
+
+```yaml
+selfHeal: true
+```
+
+If a Kubernetes resource is manually changed and becomes different from the desired configuration stored in Git, Argo CD can restore the Git-defined configuration.
+
+Conceptually:
+
+```text
+Git desired state
+      |
+      | comparison
+      v
+Argo CD
+      |
+      +---- Cluster matches Git
+      |
+      +---- Cluster differs from Git
+                    |
+                    v
+              Self-heal
+                    |
+                    v
+            Restore desired state
+```
+
+This is why production configuration changes should normally be made through Git rather than manually modifying Argo CD-managed resources with `kubectl edit`.
+
+### Pruning
+
+```yaml
+prune: true
+```
+
+When a resource is removed from the desired configuration, Argo CD can remove the corresponding Kubernetes resource from the cluster.
+
+This prevents obsolete resources from remaining in EKS after they have been removed from Git.
+
+---
+
+## Namespace Creation
+
+The applications also use:
+
+```yaml
+syncOptions:
+  - CreateNamespace=true
+```
+
+This allows Argo CD to create the destination namespace when required.
+
+The observability components were deployed into:
+
+```text
+observability
+```
+
+while Argo CD itself runs in:
+
+```text
+argocd
+```
+
+---
+
+## GitOps Change Workflow
+
+A typical platform configuration change followed this workflow:
+
+```text
+Modify values.yaml
+        |
+        v
+git add
+        |
+        v
+git commit
+        |
+        v
+git push
+        |
+        v
+GitHub
+        |
+        v
+Argo CD detects new revision
+        |
+        v
+Helm chart + values.yaml rendered
+        |
+        v
+Kubernetes manifests applied
+        |
+        v
+EKS workload updated
+```
+
+For example, when changing the OpenTelemetry Collector configuration:
+
+```bash
+git add observability/otel-collector/values.yaml
+
+git commit -m "Update OpenTelemetry collector configuration"
+
+git push origin main
+```
+
+Argo CD then reconciles the desired configuration with the resources running in EKS.
+
+---
+
+## Verifying Argo CD State
+
+The Kubernetes representation of an Argo CD Application can be inspected with:
+
+```bash
+kubectl get application <application-name> -n argocd
+```
+
+For more detail:
+
+```bash
+kubectl describe application <application-name> -n argocd
+```
+
+The complete Application specification and status can be inspected with:
+
+```bash
+kubectl get application <application-name> \
+  -n argocd \
+  -o yaml
+```
+
+This became particularly useful when troubleshooting Helm chart versions, Git revisions, and multi-source `valueFiles` paths.
+
+---
+
+## Key GitOps Lesson
+
+One of the important lessons from this implementation was that there are multiple layers of configuration:
+
+```text
+Git values.yaml
+      |
+      v
+Argo CD Application
+      |
+      v
+Helm rendering
+      |
+      v
+Generated Kubernetes resource
+      |
+      v
+Running Pod
+```
+
+When troubleshooting, checking only `values.yaml` is not always sufficient.
+
+The effective configuration should also be verified at the Kubernetes level.
+
+For example:
+
+```bash
+kubectl get configmap <configmap-name> -n observability -o yaml
+```
+
+or:
+
+```bash
+kubectl get statefulset <name> -n observability -o yaml
+```
+
+This verifies what configuration Argo CD and Helm actually rendered and deployed rather than assuming that the intended Git configuration reached the workload successfully.
