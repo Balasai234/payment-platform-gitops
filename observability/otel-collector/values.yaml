@@ -1,4 +1,13 @@
 mode: daemonset
+extraVolumes:
+  - name: varlogpods
+    hostPath:
+      path: /var/log/pods
+
+extraVolumeMounts:
+  - name: varlogpods
+    mountPath: /var/log/pods
+    readOnly: true
 
 
 image:
@@ -21,6 +30,11 @@ config:
       spike_limit_percentage: 25
 
   receivers:
+    filelog:
+      include:
+        - /var/log/pods/*/*/*.log
+      start_at: end
+      include_file_path: true
     jaeger:
       protocols:
         grpc:
@@ -55,7 +69,7 @@ config:
 
     pipelines:
       logs:
-        receivers: [otlp]
+        receivers: [otlp,filelog]
         processors: [memory_limiter, batch]
         exporters: [debug]
 
