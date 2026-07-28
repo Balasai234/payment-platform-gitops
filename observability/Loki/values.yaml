@@ -1,0 +1,17 @@
+loki:
+  enabled: true
+
+promtail:
+  enabled: true
+
+grafana:
+  enabled: false
+
+fluent-bit:
+  enabled: false
+
+filebeat:
+  enabled: false
+
+logstash:
+  enabled: false
