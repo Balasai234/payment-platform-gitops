@@ -1,6 +1,5 @@
-mode: deployment
+mode: daemonset
 
-replicaCount: 1
 
 image:
   repository: otel/opentelemetry-collector-k8s
