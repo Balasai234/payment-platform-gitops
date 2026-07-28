@@ -9,15 +9,13 @@ spec:
   project: default
 
   sources:
-    # Official Loki Stack Helm Chart
     - repoURL: https://grafana.github.io/helm-charts
-      chart: loki-stack
-      targetRevision: 2.10.2
+      chart: loki
+      targetRevision: 6.27.0
       helm:
         valueFiles:
-          - $values/observability/Loki/values.yaml
+          - $values/observability/loki/values.yaml
 
-    # Your GitOps Repository
     - repoURL: https://github.com/Balasai234/payment-platform-gitops.git
       targetRevision: main
       ref: values
