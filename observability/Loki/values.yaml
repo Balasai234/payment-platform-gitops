@@ -1,8 +1,5 @@
 deploymentMode: SingleBinary
 
-singleBinary:
-  replicas: 1
-
 loki:
   auth_enabled: false
 
@@ -22,18 +19,8 @@ loki:
           prefix: index_
           period: 24h
 
-gateway:
-  enabled: false
+singleBinary:
+  replicas: 1
 
-backend:
-  replicas: 0
-
-read:
-  replicas: 0
-
-write:
-  replicas: 0
-
-monitoring:
-  selfMonitoring:
+  persistence:
     enabled: false
